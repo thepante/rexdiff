@@ -15,6 +15,8 @@ const ANSI_QUERIED: [u8; 4] = [1, 2, 3, 4];
 pub struct Detected {
     pub fg: Option<Rgb>,
     pub bg: Option<Rgb>,
+    /// The terminal's own answer to "light or dark?" (`CSI ? 996 n`).
+    pub dark: Option<bool>,
     /// The palette's red, green, yellow, and blue, in that order.
     pub ansi: [Option<Rgb>; 4],
 }
@@ -23,11 +25,14 @@ pub struct Detected {
 /// crossterm is reading events. The DA1 reply marks the end: every terminal
 /// answers it, so we never wait for nothing.
 pub fn query(timeout: Duration) -> Option<Detected> {
-    let mut q = String::from("\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
+    // Queries end in BEL, the original xterm form: some Rex builds don't
+    // answer OSC 10/11 when they end in ST (`ESC \`). The color-scheme query
+    // backs it up when the background still doesn't come back.
+    let mut q = String::from("\x1b]10;?\x07\x1b]11;?\x07");
     for i in ANSI_QUERIED {
-        q.push_str(&format!("\x1b]4;{i};?\x1b\\"));
+        q.push_str(&format!("\x1b]4;{i};?\x07"));
     }
-    q.push_str("\x1b[c");
+    q.push_str("\x1b[?996n\x1b[c");
     let mut out = std::io::stdout();
     out.write_all(q.as_bytes()).ok()?;
     out.flush().ok()?;
@@ -55,7 +60,7 @@ pub fn query(timeout: Duration) -> Option<Detected> {
         }
     }
     let d = parse(&String::from_utf8_lossy(&buf));
-    (d.bg.is_some() || d.fg.is_some()).then_some(d)
+    (d.bg.is_some() || d.fg.is_some() || d.dark.is_some()).then_some(d)
 }
 
 fn has_da1(buf: &[u8]) -> bool {
@@ -70,6 +75,12 @@ fn has_da1(buf: &[u8]) -> bool {
 
 fn parse(s: &str) -> Detected {
     let mut d = Detected::default();
+    // Color scheme: `CSI ? 997 ; 1 n` is dark, `; 2 n` light.
+    if s.contains("\x1b[?997;1n") {
+        d.dark = Some(true);
+    } else if s.contains("\x1b[?997;2n") {
+        d.dark = Some(false);
+    }
     for part in s.split("\x1b]").skip(1) {
         let end = part.find(['\x07', '\x1b']).unwrap_or(part.len());
         let body = &part[..end];
@@ -136,7 +147,8 @@ fn rgb(c: Rgb) -> Color {
 impl Palette {
     pub fn from(d: Option<Detected>) -> Self {
         let d = d.unwrap_or_default();
-        let dark = d.bg.map(|b| luma(b) < 0.5).unwrap_or(true);
+        // The background decides; without it, the terminal's light/dark answer.
+        let dark = d.bg.map(|b| luma(b) < 0.5).or(d.dark).unwrap_or(true);
         let (bg, fg) = match dark {
             true => (d.bg.unwrap_or((24, 24, 27)), d.fg.unwrap_or((228, 228, 231))),
             false => (d.bg.unwrap_or((255, 255, 255)), d.fg.unwrap_or((36, 41, 47))),
