@@ -105,6 +105,10 @@ struct App {
     confirm: Option<Confirm>,
     /// A commit in progress, and what it's doing.
     busy: Option<String>,
+    /// The branch row an action runs on, and what it's doing ("pulling").
+    busy_branch: Option<(String, &'static str)>,
+    /// When the current action started, to animate the spinner.
+    busy_since: Instant,
     quit: bool,
 }
 
@@ -157,6 +161,8 @@ pub fn run(cwd: PathBuf) -> std::io::Result<()> {
         commit_box: None,
         confirm: None,
         busy: None,
+        busy_branch: None,
+        busy_since: Instant::now(),
         quit: false,
     };
 
@@ -222,7 +228,8 @@ impl App {
         let mut last_input = Instant::now();
 
         while !self.quit {
-            if dirty {
+            // Keep redrawing while something runs, so the spinner turns.
+            if dirty || self.busy.is_some() {
                 terminal.draw(|f| self.draw(f))?;
                 dirty = false;
             }
@@ -354,6 +361,7 @@ impl App {
             Msg::Progress(p) => self.busy = Some(p),
             Msg::Done(result) => {
                 self.busy = None;
+                self.busy_branch = None;
                 self.flash = Some(match result {
                     Ok(summary) => Flash::new(format!("✓ {summary}"), true),
                     Err(e) => Flash::new(e, false),
@@ -514,7 +522,7 @@ impl App {
         // A pending confirmation: `y` goes ahead, any other key cancels.
         if let Some(c) = self.confirm.take() {
             if matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-                self.busy = Some(c.busy);
+                self.start_busy(c.busy, c.branch);
                 let _ = self.jobs.send(c.job);
             }
             return;
@@ -667,7 +675,7 @@ impl App {
             return;
         }
         let (name, remote) = (b.name.clone(), b.remote);
-        self.busy = Some(format!("Switching to {name}…"));
+        self.start_busy(format!("Switching to {name}…"), Some((name.clone(), "switching")));
         let _ = self.jobs.send(Job::Checkout { name, remote });
     }
 
@@ -687,7 +695,7 @@ impl App {
         if self.busy.is_some() {
             return;
         }
-        self.busy = Some("Fetching…".into());
+        self.start_busy("Fetching…".into(), None);
         let _ = self.jobs.send(Job::Fetch);
     }
 
@@ -701,7 +709,7 @@ impl App {
             return;
         }
         let name = b.name.clone();
-        self.busy = Some(format!("Merging {name}…"));
+        self.start_busy(format!("Merging {name}…"), Some((name.clone(), "merging")));
         let _ = self.jobs.send(Job::Merge { name });
     }
 
@@ -710,7 +718,7 @@ impl App {
             return;
         }
         let Some(name) = self.selected_local_branch() else { return };
-        self.busy = Some(format!("Pulling {name}…"));
+        self.start_busy(format!("Pulling {name}…"), Some((name.clone(), "pulling")));
         let _ = self.jobs.send(Job::Pull { name });
     }
 
@@ -719,7 +727,7 @@ impl App {
             return;
         }
         let Some(name) = self.selected_local_branch() else { return };
-        self.busy = Some(format!("Pushing {name}…"));
+        self.start_busy(format!("Pushing {name}…"), Some((name.clone(), "pushing")));
         let _ = self.jobs.send(Job::Push { name });
     }
 
@@ -754,6 +762,7 @@ impl App {
             warning,
             verb: "discard",
             busy: format!("Discarding {label}…"),
+            branch: None,
             job: Job::Discard {
                 restore: restore.iter().map(|f| f.path.clone()).collect(),
                 new: new.iter().map(|f| f.path.clone()).collect(),
@@ -788,8 +797,21 @@ impl App {
             warning,
             verb: "delete",
             busy: format!("Deleting {name}…"),
+            branch: Some((name.clone(), "deleting")),
             job: Job::DeleteBranch { name, force },
         });
+    }
+
+    fn start_busy(&mut self, text: String, branch: Option<(String, &'static str)>) {
+        self.busy = Some(text);
+        self.busy_branch = branch;
+        self.busy_since = Instant::now();
+    }
+
+    /// The current frame of the spinner shown while an action runs.
+    fn spinner(&self) -> &'static str {
+        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        FRAMES[(self.busy_since.elapsed().as_millis() / 80) as usize % FRAMES.len()]
     }
 
     fn open_commit_box(&mut self) {
@@ -818,7 +840,7 @@ impl App {
                     return;
                 }
                 self.commit_box = None;
-                self.busy = Some("Committing…".into());
+                self.start_busy("Committing…".into(), None);
                 let _ = self.jobs.send(Job::Commit { message });
             }
             KeyCode::Backspace if k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
@@ -1239,8 +1261,11 @@ impl App {
             let lim = x.saturating_sub(2);
             put(buf, &mut x, y, right, &when, base.fg(p.faint));
 
+            let working = self.busy_branch.as_ref().filter(|(n, _)| *n == b.name).map(|(_, verb)| *verb);
             let mut x = area.x + 1;
-            if b.current {
+            if working.is_some() {
+                put(buf, &mut x, y, lim, &format!("{} ", self.spinner()), base.fg(p.blue));
+            } else if b.current {
                 put(buf, &mut x, y, lim, "● ", base.fg(p.green));
             } else if b.worktree.is_some() {
                 put(buf, &mut x, y, lim, "◆ ", base.fg(p.blue));
@@ -1259,8 +1284,13 @@ impl App {
             }
             x = start + name_w + 3;
             let start = x;
-            for (t, c) in sync(b) {
-                put(buf, &mut x, y, lim, &t, base.fg(c));
+            match working {
+                Some(verb) => put(buf, &mut x, y, lim, &format!("{verb}…"), base.fg(p.blue)),
+                None => {
+                    for (t, c) in sync(b) {
+                        put(buf, &mut x, y, lim, &t, base.fg(c));
+                    }
+                }
             }
             x = start + sync_w + 3;
             put(buf, &mut x, y, lim, &b.subject, base.fg(p.muted));
@@ -1513,7 +1543,7 @@ impl App {
             return None;
         }
         if let Some(busy) = &self.busy {
-            put(buf, &mut x, y, right, "◌ ", Style::new().fg(p.blue));
+            put(buf, &mut x, y, right, &format!("{} ", self.spinner()), Style::new().fg(p.blue));
             put(buf, &mut x, y, right, busy, Style::new().fg(p.muted));
             return None;
         }
@@ -1610,6 +1640,8 @@ struct Confirm {
     verb: &'static str,
     /// The footer while it runs.
     busy: String,
+    /// The branch row that shows the spinner, if any.
+    branch: Option<(String, &'static str)>,
     job: Job,
 }
 
