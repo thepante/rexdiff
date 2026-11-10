@@ -29,6 +29,10 @@ const FS_DEBOUNCE: Duration = Duration::from_millis(120);
 /// Safety reload, in case a filesystem event gets lost.
 const FALLBACK_REFRESH: Duration = Duration::from_secs(10);
 const THEME_EVERY: Duration = Duration::from_secs(4);
+/// Extra theme checks right after the panel opens: a brand-new Rex pane starts
+/// with the server's default colors, and the app applies your theme a moment
+/// later.
+const THEME_EARLY: [Duration; 2] = [Duration::from_millis(600), Duration::from_millis(1500)];
 
 #[derive(Default, Clone, Copy)]
 struct Areas {
@@ -212,6 +216,8 @@ impl App {
         let mut dirty = true;
         let mut refresh_due: Option<Instant> = None;
         let mut last_refresh = Instant::now();
+        let started = Instant::now();
+        let mut early_checks = THEME_EARLY.iter().peekable();
         let mut last_theme = Instant::now();
         let mut last_input = Instant::now();
 
@@ -269,9 +275,11 @@ impl App {
                 last_refresh = now;
             }
 
-            // Every so often, check whether the Rex theme changed. Only while the
-            // panel is idle, so a keypress doesn't get swallowed mid-reply.
-            if now - last_theme >= THEME_EVERY && now - last_input >= Duration::from_secs(2) {
+            // Check the Rex theme a couple of times right after opening, then
+            // every so often. The periodic check waits for the panel to be
+            // idle, so a keypress doesn't get swallowed mid-reply.
+            let early = early_checks.next_if(|&&at| now - started >= at).is_some();
+            if early || (now - last_theme >= THEME_EVERY && now - last_input >= Duration::from_secs(2)) {
                 last_theme = now;
                 if let Some(d) = theme::query(Duration::from_millis(200))
                     && Some(d) != self.detected
