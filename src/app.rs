@@ -67,6 +67,8 @@ struct App {
     jobs: Sender<Job>,
     /// Top folder of the repository: file paths are relative to it.
     root: PathBuf,
+    /// The command Enter opens files with (`--editor`).
+    editor: String,
     view: View,
     /// Column ranges of the "Changes" and "Branches" tabs in the header, for clicks.
     tabs: Cell<[(u16, u16); 2]>,
@@ -113,12 +115,12 @@ struct App {
     busy_branch: Option<(String, &'static str)>,
     /// When the current action started, to animate the spinner.
     busy_since: Instant,
-    /// A file (and line) to open in nvim, once the keys in flight are handled.
+    /// A file (and line) to open in the editor, once the keys in flight are handled.
     edit: Option<(String, u32)>,
     quit: bool,
 }
 
-pub fn run(cwd: PathBuf) -> std::io::Result<()> {
+pub fn run(cwd: PathBuf, editor: String) -> std::io::Result<()> {
     let (job_tx, job_rx) = mpsc::channel();
     let (msg_tx, msg_rx) = mpsc::channel();
     {
@@ -142,6 +144,7 @@ pub fn run(cwd: PathBuf) -> std::io::Result<()> {
     let mut app = App {
         jobs: job_tx,
         root,
+        editor,
         view: View::Changes,
         tabs: Cell::new([(0, 0); 2]),
         branches: None,
@@ -518,7 +521,7 @@ impl App {
         }
     }
 
-    /// Enter: on a folder, open/close it; on a file, open it in nvim.
+    /// Enter: on a folder, open/close it; on a file, open it in the editor.
     fn edit_here(&mut self) {
         let idx = match self.rows.get(self.cursor).map(|r| &r.item) {
             Some(Item::Dir { .. }) => return self.toggle_dir(self.cursor),
@@ -550,16 +553,27 @@ impl App {
             .unwrap_or(1)
     }
 
-    /// Hands the pane to nvim and takes it back when nvim exits.
+    /// Hands the pane to the editor and takes it back when the editor exits.
     fn open_editor(&mut self, terminal: &mut ratatui::DefaultTerminal, path: &str, line: u32) -> std::io::Result<()> {
+        let mut words = self.editor.split_whitespace();
+        let program = words.next().unwrap_or("nvim");
+        let mut cmd = Command::new(program);
+        cmd.args(words).current_dir(&self.root);
+        // Helix takes the line after the path; vi, vim, nvim, emacs, nano,
+        // micro and kakoune all take `+N` before it.
+        if matches!(Path::new(program).file_name().and_then(|n| n.to_str()), Some("hx" | "helix")) {
+            cmd.arg(format!("{path}:{line}"));
+        } else {
+            cmd.arg(format!("+{line}")).arg(path);
+        }
         execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste)?;
         ratatui::restore();
-        let status = Command::new("nvim").arg(format!("+{line}")).arg(path).current_dir(&self.root).status();
+        let status = cmd.status();
         enable_raw_mode()?;
         execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
         terminal.clear()?;
         if let Err(e) = status {
-            self.flash = Some(Flash::new(format!("Could not open nvim: {e}"), false));
+            self.flash = Some(Flash::new(format!("Could not open {program}: {e}"), false));
         }
         Ok(())
     }

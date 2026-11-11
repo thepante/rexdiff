@@ -17,13 +17,14 @@ Usage:
   rexdiff toggle                           open or close it
       --cwd DIR                            use another folder (accepts file://…)
       --focus                              focus the panel when it opens
-  rexdiff view                             run the panel in the current terminal
+      --editor CMD                         editor that Enter opens (default: nvim)
+  rexdiff view [--editor CMD]              run the panel in the current terminal
 
 In the panel:
   ↑↓ / j k        previous / next row (folders and files)
   ← → / h l       previous folder (above) / next folder (below)
   space           on a file: stage/unstage it (✓ = reviewed); on a folder: open/close
-  Enter           on a file: open it in nvim at the first change on screen; on a folder: open/close
+  Enter           on a file: open it in the editor at the first change on screen; on a folder: open/close
   Tab / Shift-Tab next / previous file, wrapping around
   f / b           scroll the diff one page   J K  one line   g / G  top / bottom
   x               toggle between changed hunks only and the whole file
@@ -58,7 +59,7 @@ fn main() -> ExitCode {
             Ok(false) => show(rest),
             Err(e) => Err(e),
         },
-        "view" => view(),
+        "view" => view(rest),
         "help" | "-h" | "--help" => {
             print!("{HELP}");
             Ok(())
@@ -75,13 +76,25 @@ fn main() -> ExitCode {
     }
 }
 
-fn view() -> Result<(), String> {
+fn view(args: &[String]) -> Result<(), String> {
     use std::io::IsTerminal;
+    let mut editor = "nvim".to_string();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--editor" => editor = editor_arg(it.next())?,
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
     if !std::io::stdout().is_terminal() {
         return Err("`view` needs a terminal".into());
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    app::run(cwd).map_err(|e| e.to_string())
+    app::run(cwd, editor).map_err(|e| e.to_string())
+}
+
+fn editor_arg(value: Option<&String>) -> Result<String, String> {
+    value.filter(|v| !v.trim().is_empty()).cloned().ok_or_else(|| "--editor needs a command".into())
 }
 
 struct RexCtx {
@@ -175,6 +188,7 @@ fn show(args: &[String]) -> Result<(), String> {
     let mut ratio = "45".to_string();
     let mut dir = "right";
     let mut focus = false;
+    let mut editor = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -182,6 +196,7 @@ fn show(args: &[String]) -> Result<(), String> {
             "--focus" => focus = true,
             "--ratio" => ratio = it.next().cloned().ok_or("--ratio needs a number")?,
             s if s.starts_with("--ratio=") => ratio = s["--ratio=".len()..].to_string(),
+            "--editor" => editor = Some(editor_arg(it.next())?),
             "--cwd" => {
                 let dir = it.next().ok_or("--cwd needs a folder")?;
                 if !dir.is_empty() {
@@ -208,6 +223,7 @@ fn show(args: &[String]) -> Result<(), String> {
         .arg("--")
         .arg(&exe)
         .arg("view")
+        .args(editor.map(|e| ["--editor".to_string(), e]).into_iter().flatten())
         .output()
         .map_err(|e| format!("could not run `rex`: {e}"))?;
     if !out.status.success() {
