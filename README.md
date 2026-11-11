@@ -137,7 +137,8 @@ does nothing.
 | --- | --- |
 | `↑` `↓` / `j` `k` | Previous / next row (folders and files) |
 | `←` `→` / `h` `l` | Previous / next folder. An open folder lands on its first file |
-| `space` / `Enter` | On a file: stage it, or unstage it if it's fully staged. On a folder: open or close it |
+| `space` | On a file: stage it, or unstage it if it's fully staged. On a folder: open or close it |
+| `Enter` | On a file: open it in `nvim` at the first change on screen (scroll the diff to a hunk to pick it). On a folder: open or close it |
 | `Tab` / `Shift-Tab` | Next / previous file, wrapping around |
 | `f` / `b`, `PgDn` / `PgUp` | Scroll the diff one page |
 | `J` / `K` | Scroll the diff one line |
