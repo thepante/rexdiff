@@ -111,7 +111,9 @@ close it. The action also shows up in the command palette as
 "rexdiff: Toggle Changes".
 
 Rex matches keys without Shift applied, so `?` is written as `alt+shift+/`.
-Change the key in the last line of the file if you prefer another one.
+Change the key in the last line of the file if you prefer another one. To use
+another editor than `nvim`, add it to the command in the file:
+`"toggle", "--focus", "--editor", "hx", "--cwd", …`.
 
 ## Usage
 
@@ -124,6 +126,7 @@ rexdiff toggle          # open or close it
 rexdiff --ratio 35      # narrower panel
 rexdiff --below         # open below instead of to the right
 rexdiff --focus         # focus the panel when it opens
+rexdiff --editor hx     # editor that Enter opens (default: nvim)
 rexdiff view            # run the panel in the current terminal
 rexdiff help
 ```
@@ -138,7 +141,7 @@ does nothing.
 | `↑` `↓` / `j` `k` | Previous / next row (folders and files) |
 | `←` `→` / `h` `l` | Previous / next folder. An open folder lands on its first file |
 | `space` | On a file: stage it, or unstage it if it's fully staged. On a folder: open or close it |
-| `Enter` | On a file: open it in `nvim` at the first change on screen (scroll the diff to a hunk to pick it). On a folder: open or close it |
+| `Enter` | On a file: open it in the editor (`nvim`, or the one `--editor` sets) at the first change on screen (scroll the diff to a hunk to pick it). On a folder: open or close it |
 | `Tab` / `Shift-Tab` | Next / previous file, wrapping around |
 | `f` / `b`, `PgDn` / `PgUp` | Scroll the diff one page |
 | `J` / `K` | Scroll the diff one line |
