@@ -3,6 +3,7 @@
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,7 @@ use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
@@ -63,6 +65,8 @@ enum View {
 
 struct App {
     jobs: Sender<Job>,
+    /// Top folder of the repository: file paths are relative to it.
+    root: PathBuf,
     view: View,
     /// Column ranges of the "Changes" and "Branches" tabs in the header, for clicks.
     tabs: Cell<[(u16, u16); 2]>,
@@ -109,6 +113,8 @@ struct App {
     busy_branch: Option<(String, &'static str)>,
     /// When the current action started, to animate the spinner.
     busy_since: Instant,
+    /// A file (and line) to open in nvim, once the keys in flight are handled.
+    edit: Option<(String, u32)>,
     quit: bool,
 }
 
@@ -129,8 +135,13 @@ pub fn run(cwd: PathBuf) -> std::io::Result<()> {
     let detected = theme::query(Duration::from_millis(400));
     execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
 
+    let root = git2::Repository::discover(&cwd)
+        .ok()
+        .and_then(|r| r.workdir().map(Path::to_path_buf))
+        .unwrap_or_else(|| cwd.clone());
     let mut app = App {
         jobs: job_tx,
+        root,
         view: View::Changes,
         tabs: Cell::new([(0, 0); 2]),
         branches: None,
@@ -163,6 +174,7 @@ pub fn run(cwd: PathBuf) -> std::io::Result<()> {
         busy: None,
         busy_branch: None,
         busy_since: Instant::now(),
+        edit: None,
         quit: false,
     };
 
@@ -249,6 +261,9 @@ impl App {
                     if !event::poll(Duration::ZERO)? {
                         break;
                     }
+                }
+                if let Some((path, line)) = self.edit.take() {
+                    self.open_editor(terminal, &path, line)?;
                 }
                 last_input = Instant::now();
                 dirty = true;
@@ -503,6 +518,52 @@ impl App {
         }
     }
 
+    /// Enter: on a folder, open/close it; on a file, open it in nvim.
+    fn edit_here(&mut self) {
+        let idx = match self.rows.get(self.cursor).map(|r| &r.item) {
+            Some(Item::Dir { .. }) => return self.toggle_dir(self.cursor),
+            Some(Item::File { idx, .. }) => *idx,
+            None => return,
+        };
+        let Some(f) = self.files().get(idx) else { return };
+        if !self.root.join(&f.path).exists() {
+            self.flash = Some(Flash::new(format!("{} no longer exists", f.path), false));
+            return;
+        }
+        let path = f.path.clone();
+        let line = self.edit_line(&path);
+        self.edit = Some((path, line));
+    }
+
+    /// The first change from the top of the diff view (so scrolling to a hunk
+    /// picks it), or the line at the top when no change follows.
+    fn edit_line(&self, path: &str) -> u32 {
+        let Some(d) = self.diff.as_ref().filter(|d| d.path == path) else { return 1 };
+        let top = self.wrap.locate(self.diff_scroll).0.min(d.rows.len());
+        let rows = &d.rows[top..];
+        let change = rows.iter().position(|r| matches!(r.kind, RowKind::Add | RowKind::Del)).unwrap_or(0);
+        // A deletion has no new line: use the line that took its place.
+        rows[change..]
+            .iter()
+            .find_map(|r| r.new)
+            .or_else(|| d.rows[..top + change].iter().rev().find_map(|r| r.new))
+            .unwrap_or(1)
+    }
+
+    /// Hands the pane to nvim and takes it back when nvim exits.
+    fn open_editor(&mut self, terminal: &mut ratatui::DefaultTerminal, path: &str, line: u32) -> std::io::Result<()> {
+        execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste)?;
+        ratatui::restore();
+        let status = Command::new("nvim").arg(format!("+{line}")).arg(path).current_dir(&self.root).status();
+        enable_raw_mode()?;
+        execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+        terminal.clear()?;
+        if let Err(e) = status {
+            self.flash = Some(Flash::new(format!("Could not open nvim: {e}"), false));
+        }
+        Ok(())
+    }
+
     fn toggle_stage(&mut self, idx: usize) {
         let Some(f) = self.files().get(idx) else { return };
         let add = f.staged != Staged::Fully;
@@ -550,7 +611,8 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.move_row(1),
             KeyCode::Left | KeyCode::Char('h') => self.step_folder(false),
             KeyCode::Right | KeyCode::Char('l') => self.step_folder(true),
-            KeyCode::Char(' ') | KeyCode::Enter => self.toggle_here(),
+            KeyCode::Char(' ') => self.toggle_here(),
+            KeyCode::Enter => self.edit_here(),
             KeyCode::Tab => self.jump_file(true),
             KeyCode::BackTab => self.jump_file(false),
             KeyCode::Char('J') => self.scroll_diff(1),
